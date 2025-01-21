@@ -30,7 +30,7 @@ namespace dgv_sorting_and_async
         IList Records { get; } = new SortableBindingList<LogRecord>();
 
         /// <summary>
-        /// An example of a method that conjoins two lists
+        /// An example of a method that "conjoins two lists
         /// into one on a separate thread via Task.Run()"
         /// </summary>     
         private async Task RetrieveLogsFromClientMachineAsync(object? sender, EventArgs e)
