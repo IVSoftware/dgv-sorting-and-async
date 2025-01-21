@@ -2,6 +2,7 @@ using Newtonsoft.Json;
 using System;
 using System.Collections;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 
@@ -47,28 +48,31 @@ namespace dgv_sorting_and_async
                 {
                     var syslogRecords = await localParseResponseAsync(syslogResponse);
                     var yumRecords = await localParseResponseAsync(yumResponse);
+                    // Conjoin while still in the background thread.
+                    Debug.Assert(InvokeRequired, "Expecting we ARE NOT on the UI thread.");
                     logs = syslogRecords.Concat(yumRecords).OrderBy(record => record.Timestamp);
-                }
-                async Task<List<LogRecord>> localParseResponseAsync(HttpResponseMessage response)
-                {
-                    if (response.IsSuccessStatusCode &&
-                        JsonConvert
-                        .DeserializeObject<List<LogRecord>>(await response.Content.ReadAsStringAsync()) is { } records)
-                    {
-                        return records;
-                    }
-                    else return new List<LogRecord>();
                 }
             });
             // After awaiting the tasks that retrieve the data and combine
             // them, we're back in the UI synchronization context.
             if (logs != null)
             {
+                Debug.Assert(!InvokeRequired, "Expecting we ARE on the UI thread.");
                 Records.Clear();
                 foreach (var record in logs)
                 {
                     Records.Add(record);
                 }
+            }
+            async Task<List<LogRecord>> localParseResponseAsync(HttpResponseMessage response)
+            {
+                if (response.IsSuccessStatusCode &&
+                    JsonConvert
+                    .DeserializeObject<List<LogRecord>>(await response.Content.ReadAsStringAsync()) is { } records)
+                {
+                    return records;
+                }
+                else return new List<LogRecord>();
             }
         }
     }
