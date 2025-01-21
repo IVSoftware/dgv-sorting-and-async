@@ -123,6 +123,10 @@ namespace dgv_sorting_and_async
         Random _rando = new Random(1);
         public async Task<HttpResponseMessage?> SystemQueryAsync(LogType logType)
         {
+            Debug.Assert(
+                !(SynchronizationContext.Current is WindowsFormsSynchronizationContext),
+                 "Expecting we ARE ALREADY NOT on the UI thread.");
+            // Even so, it's likely to be async on the server.
             return await Task.Run(() =>
             {
                 var names = logType switch
