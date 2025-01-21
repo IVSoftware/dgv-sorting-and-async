@@ -11,31 +11,35 @@ namespace dgv_sorting_and_async
         public MainForm()
         {
             InitializeComponent();
-            buttonUpdate.Click += async(sender, e) =>
+            // Test the 
+            buttonUpdate.Click += (sender, e) => 
+                _ = RetrieveLogsFromClientMachine(sender, e);
+        }
+
+        private async Task RetrieveLogsFromClientMachine(object? sender, EventArgs e)
+        {
+            var syslogTask = _clientMachine.QuerySYSLOG();
+            var yumStatusTask = _clientMachine.QueryYumStatus();
+            await Task.WhenAll(syslogTask, yumStatusTask);
+            var syslogResponse = await syslogTask;
+            var yumResponse = await yumStatusTask;
+            if (syslogResponse != null && yumResponse != null)
             {
-                var syslogTask = _clientMachine.QuerySYSLOG();
-                var yumStatusTask = _clientMachine.QueryYumStatus();
-                await Task.WhenAll(syslogTask, yumStatusTask);
-                var syslogResponse = await syslogTask;
-                var yumResponse = await yumStatusTask;
-                if (syslogResponse != null && yumResponse != null)
+                var syslogRecords = await ParseResponseAsync(syslogResponse);
+                var yumRecords = await ParseResponseAsync(yumResponse);
+                // Initial sort by timestamp
+                Records.Clear();
+                foreach(var record in 
+                    syslogRecords.Concat(yumRecords)
+                    .OrderBy(record => record.Timestamp))
                 {
-                    var syslogRecords = await ParseResponseAsync(syslogResponse);
-                    var yumRecords = await ParseResponseAsync(yumResponse);
-                    // Initial sort
-                    Records.Clear();
-                    foreach(var record in 
-                        syslogRecords.Concat(yumRecords)
-                       .OrderBy(record => record.Timestamp))
-                    {
-                        Records.Add(record);
-                    }
+                    Records.Add(record);
                 }
-                else
-                {
-                    MessageBox.Show("One or both queries failed.", "Update Failed");
-                }
-            };
+            }
+            else
+            {
+                MessageBox.Show("One or both queries failed.", "Update Failed");
+            }
         }
 
         protected override void OnLoad(EventArgs e)
@@ -55,42 +59,6 @@ namespace dgv_sorting_and_async
                 return records;
             }
             else return  new List<LogRecord>();
-        }
-    }
-    class ClientMachine
-    {
-        Random _rando = new Random(1);
-        public async Task<HttpResponseMessage?> QuerySYSLOG() 
-        {
-            await Task.Delay(TimeSpan.FromSeconds(_rando.NextDouble()));    // Simulated query time
-            var records = new[]
-            { "Server started", "Connection lost", "Recovered", "Warning issued", "All systems operational" }
-            .Select(_ => new LogRecord
-            {
-                Type = LogType.SYSLOG,
-                Description = _,
-                Timestamp = DateTime.UtcNow.AddMinutes(-_rando.Next(5, 60)),
-            });
-
-            var jsonContent = new StringContent(Newtonsoft.Json.JsonConvert.SerializeObject(records), System.Text.Encoding.UTF8, "application/json");
-            return new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = jsonContent };
-
-        }
-        public async Task<HttpResponseMessage?> QueryYumStatus()
-        {
-            await Task.Delay(TimeSpan.FromSeconds(_rando.NextDouble()));
-            var records = new[]
-            { "Version check passed", "Update required", "Critical update available", "Version up-to-date", "Unknown version error" }
-            .Select(_ => new LogRecord
-            {
-                Type = LogType.VERSION_CHECK,
-                Description = _,
-                Timestamp = DateTime.UtcNow.AddMinutes(-_rando.Next(5, 60)),
-            });
-
-            var jsonContent = new StringContent(Newtonsoft.Json.JsonConvert.SerializeObject(records), System.Text.Encoding.UTF8, "application/json");
-            return new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = jsonContent };
-
         }
     }
     public enum LogType{ SYSLOG, VERSION_CHECK }
@@ -137,5 +105,41 @@ namespace dgv_sorting_and_async
         protected override ListSortDirection SortDirectionCore => _sortDirection;
         protected override PropertyDescriptor? SortPropertyCore => _sortProperty;
         protected override void RemoveSortCore() => _isSorted = false;
+    }
+    class ClientMachine
+    {
+        Random _rando = new Random(1);
+        public async Task<HttpResponseMessage?> QuerySYSLOG()
+        {
+            await Task.Delay(TimeSpan.FromSeconds(_rando.NextDouble()));    // Simulated query time
+            var records = new[]
+            { "Server started", "Connection lost", "Recovered", "Warning issued", "All systems operational" }
+            .Select(_ => new LogRecord
+            {
+                Type = LogType.SYSLOG,
+                Description = _,
+                Timestamp = DateTime.UtcNow.AddMinutes(-_rando.Next(5, 60)),
+            });
+
+            var jsonContent = new StringContent(Newtonsoft.Json.JsonConvert.SerializeObject(records), System.Text.Encoding.UTF8, "application/json");
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = jsonContent };
+
+        }
+        public async Task<HttpResponseMessage?> QueryYumStatus()
+        {
+            await Task.Delay(TimeSpan.FromSeconds(_rando.NextDouble()));
+            var records = new[]
+            { "Version check passed", "Update required", "Critical update available", "Version up-to-date", "Unknown version error" }
+            .Select(_ => new LogRecord
+            {
+                Type = LogType.VERSION_CHECK,
+                Description = _,
+                Timestamp = DateTime.UtcNow.AddMinutes(-_rando.Next(5, 60)),
+            });
+
+            var jsonContent = new StringContent(Newtonsoft.Json.JsonConvert.SerializeObject(records), System.Text.Encoding.UTF8, "application/json");
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = jsonContent };
+
+        }
     }
 }
