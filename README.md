@@ -1,11 +1,20 @@
-Your code and description provide a general idea, and after carefully looking at it my view is that it can be framed as a [Separation of Concerns (SoC)](https://en.wikipedia.org/wiki/Separation_of_concerns#:~:text=In%20computer%20science%2C%20separation%20of,code%20of%20a%20computer%20program.) issue. In particular, we can identify the _single point_ where the data processing that is on the background thread needs to be marshaled back onto the UI thread.
+Your code and description provide a general idea, and after carefully reviewing it, I believe this can be framed as a [Separation of Concerns (SoC)](https://en.wikipedia.org/wiki/Separation_of_concerns#:~:text=In%20computer%20science%2C%20separation%20of,code%20of%20a%20computer%20program.) issue since the overall objective involves retrieving and merging "two lists" from a remote machine as a background task, while separately managing a `DataGridView` bound to a "sortable binding list" that tracks any changes on the UI thread. The goal, of course, is to keep data retrieval separate from UI logic and ensure that the UI remains responsive.
 
-I'd like to try and break it down, but I'm going to have to contrive an example to show what I mean. _I realize this is not "exactly" what you're doing._ We're talking "conceptually" here.
+
+The main points of this answer are:
+ - Bind the data source one time only.
+ - Stage the new recordset using Task.Run() and await its completion.
+ - Clear and repopulate the binding list with the new data.
+
+I'd like to try and break this all down, but I'm going to have to contrive an example to show what I mean. _I realize this is not "exactly" what you're doing._ We're talking "conceptually" here.
+
 ___
+
+**Minimal Example**
 
 >I have a DataGridView that is bound to a custom SortableBindingList that implements sorting [...]
 
-This is a good start, but first let's bind it and be done with it.
+This is a good start, but first let's bind it and be done with it. There's no need to reassign it each time new data arrives.
 
 ~~~
 public partial class MainForm : Form
@@ -16,6 +25,7 @@ public partial class MainForm : Form
         dataGridView.DataSource = Records;
         dataGridView.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.AllCells;
         dataGridView.Columns[nameof(LogRecord.Description)].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+        dataGridView.Columns[nameof(LogRecord.Timestamp)].DefaultCellStyle.Format = @"hh\:mm\:ss";
     }
     IList Records { get; } = new SortableBindingList<LogRecord>();
     .
@@ -30,8 +40,9 @@ public class LogRecord
     public string? Description { get; set; }
 }
 ~~~
+___
 
-**Custom Sortable Binding List Example**
+**Custom `SortableBindingList` Implementation Example**
 ~~~
 public class SortableBindingList<T> : BindingList<T>
 {
@@ -69,6 +80,7 @@ public class SortableBindingList<T> : BindingList<T>
     protected override void RemoveSortCore() => _isSorted = false;
 }
 ~~~
+___
 
 **Client Machine Requirement**
 
@@ -90,21 +102,20 @@ public partial class MainForm : Form
         // Test the async method by triggering it with the Update button 
         buttonUpdate.Click += (sender, e) => 
             _ = RetrieveLogsFromClientMachineAsync(sender, e);
-    }
-    
+    }    
 
     /// <summary>
-    /// An example of a method that conjoins two lists
+    /// An example of a method that "conjoins two lists
     /// into one on a separate thread via Task.Run()"
-    /// </summary>        
+    /// </summary>     
     private async Task RetrieveLogsFromClientMachineAsync(object? sender, EventArgs e)
     {
-        // "The [...] method that is fired [...] conjoins two
-        // lists into one on a separate thread via Task.Run()"
-        await Task.Run(async() =>
+        IEnumerable? logs = null;
+        await Task.Run(async () =>
         {
-            var syslogTask = _clientMachine.QuerySYSLOG();
-            var yumStatusTask =  _clientMachine.QueryYumStatus();
+            // Retrieve the "two lists".
+            var syslogTask = _clientMachine.SystemQueryAsync(LogType.SYSLOG);
+            var yumStatusTask = _clientMachine.SystemQueryAsync(LogType.VERSION_CHECK);
             await Task.WhenAll(syslogTask, yumStatusTask);
             var syslogResponse = syslogTask.Result;
             var yumResponse = yumStatusTask.Result;
@@ -112,37 +123,36 @@ public partial class MainForm : Form
             {
                 var syslogRecords = await localParseResponseAsync(syslogResponse);
                 var yumRecords = await localParseResponseAsync(yumResponse);
-                // Marshal back onto the UI thread.
-                BeginInvoke(() =>
-                { 
-                    // Initial sort by timestamp
-                    Records.Clear();
-                    foreach(var record in 
-                        syslogRecords.Concat(yumRecords)
-                        .OrderBy(record => record.Timestamp))
-                    {
-                        Records.Add(record);
-                    }
-                });
-            }
-            else
-            {
-                MessageBox.Show("One or both queries failed.", "Update Failed");
-            }
-            async Task<List<LogRecord>> localParseResponseAsync(HttpResponseMessage response)
-            {
-                if (response.IsSuccessStatusCode &&
-                    JsonConvert
-                    .DeserializeObject<List<LogRecord>>(await response.Content.ReadAsStringAsync()) is { } records)
-                {
-                    return records;
-                }
-                else return new List<LogRecord>();
+                // Conjoin while still in the background thread.
+                Debug.Assert(InvokeRequired, "Expecting we ARE NOT on the UI thread.");
+                logs = syslogRecords.Concat(yumRecords).OrderBy(record => record.Timestamp);
             }
         });
+        // After awaiting the tasks that retrieve the data and combine
+        // them, we're back in the UI synchronization context.
+        if (logs != null)
+        {
+            Debug.Assert(!InvokeRequired, "Expecting we ARE on the UI thread.");
+            Records.Clear();
+            foreach (var record in logs)
+            {
+                Records.Add(record);
+            }
+        }
+        async Task<List<LogRecord>> localParseResponseAsync(HttpResponseMessage response)
+        {
+            if (response.IsSuccessStatusCode &&
+                JsonConvert
+                .DeserializeObject<List<LogRecord>>(await response.Content.ReadAsStringAsync()) is { } records)
+            {
+                return records;
+            }
+            else return new List<LogRecord>();
+        }
     }
 }
 ~~~
+___
 
 **Client Machine**
 
@@ -152,35 +162,27 @@ Now all we need is a stand-in for "some client machine" that serves up "certain 
 class ClientMachine
 {
     Random _rando = new Random(1);
-    public async Task<HttpResponseMessage?> QuerySYSLOG()
+    public async Task<HttpResponseMessage?> SystemQueryAsync(LogType logType)
     {
+        Debug.Assert(
+            !(SynchronizationContext.Current is WindowsFormsSynchronizationContext),
+                "Expecting we ARE ALREADY NOT on the UI thread.");
+        // Even so, it's likely to be async on the server.
         return await Task.Run(() =>
         {
-            var records = new[]
-            { "Server started", "Connection lost", "Recovered", "Warning issued", "All systems operational" }
-            .Select(_ => new LogRecord
+            var names = logType switch
             {
-                Type = LogType.SYSLOG,
+                LogType.SYSLOG => new[] { "Server started", "Connection lost", "Recovered", "Warning issued", "All systems operational" },
+                LogType.VERSION_CHECK => new[] { "Version check passed", "Update required", "Critical update available", "Version up-to-date", "Unknown version error" },
+                _ => throw new ArgumentOutOfRangeException(nameof(logType), $"Unsupported log type: {logType}")
+            };
+            var records = names.Select(_ => new LogRecord
+            {
+                Type = logType,
                 Description = _,
-                Timestamp = DateTime.UtcNow.AddMinutes(-_rando.Next(5, 60)),
+                Timestamp = DateTime.UtcNow.AddSeconds(-_rando.NextDouble() * 3600)
             });
 
-            var jsonContent = new StringContent(JsonConvert.SerializeObject(records), Encoding.UTF8, "application/json");
-            return new HttpResponseMessage(HttpStatusCode.OK) { Content = jsonContent };
-        });
-    }
-    public async Task<HttpResponseMessage?> QueryYumStatus()
-    {
-        return await Task.Run(() =>
-        {
-            var records = new[]
-            { "Version check passed", "Update required", "Critical update available", "Version up-to-date", "Unknown version error" }
-            .Select(_ => new LogRecord
-            {
-                Type = LogType.VERSION_CHECK,
-                Description = _,
-                Timestamp = DateTime.UtcNow.AddMinutes(-_rando.Next(5, 60)),
-            });
             var jsonContent = new StringContent(JsonConvert.SerializeObject(records), Encoding.UTF8, "application/json");
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = jsonContent };
         });
