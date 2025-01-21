@@ -1,4 +1,6 @@
-Your code and description provide a general idea. My read of this is that it's fundamentally a [Separation of Concerns (SoC)](https://en.wikipedia.org/wiki/Separation_of_concerns#:~:text=In%20computer%20science%2C%20separation%20of,code%20of%20a%20computer%20program.) issue. I'd like to try and break it down, but I'm going to have to contrive an example to show what I mean. _I realize this is not "exactly" what you're doing._ We're talking "conceptually" here.
+Your code and description provide a general idea, and after carefully looking at it my view is that it can be framed as a [Separation of Concerns (SoC)](https://en.wikipedia.org/wiki/Separation_of_concerns#:~:text=In%20computer%20science%2C%20separation%20of,code%20of%20a%20computer%20program.) issue. In particular, we can identify the _single point_ where the data processing that is on the background thread needs to be marshaled back onto the UI thread.
+
+I'd like to try and break it down, but I'm going to have to contrive an example to show what I mean. _I realize this is not "exactly" what you're doing._ We're talking "conceptually" here.
 ___
 
 >I have a DataGridView that is bound to a custom SortableBindingList that implements sorting [...]
@@ -79,8 +81,8 @@ public partial class MainForm : Form
 {
     .
     .
-    .
-   
+    .   
+    
     private readonly ClientMachine _clientMachine = new ClientMachine();
     public MainForm()
     {
@@ -89,45 +91,99 @@ public partial class MainForm : Form
         buttonUpdate.Click += (sender, e) => 
             _ = RetrieveLogsFromClientMachineAsync(sender, e);
     }
-    // "The last method that is fired [...] conjoins two lists into one on a separate thread via Task.Run()"
+    
+
+    /// <summary>
+    /// An example of a method that conjoins two lists
+    /// into one on a separate thread via Task.Run()"
+    /// </summary>        
     private async Task RetrieveLogsFromClientMachineAsync(object? sender, EventArgs e)
     {
-        var syslogTask = Task.Run(()=> _clientMachine.QuerySYSLOG());
-        var yumStatusTask = Task.Run(() => _clientMachine.QueryYumStatus());
-        await Task.WhenAll(syslogTask, yumStatusTask);
-        var syslogResponse = await syslogTask;
-        var yumResponse = await yumStatusTask;
-        if (syslogResponse != null && yumResponse != null)
+        // "The [...] method that is fired [...] conjoins two
+        // lists into one on a separate thread via Task.Run()"
+        await Task.Run(async() =>
         {
-            var syslogRecords = await localParseResponseAsync(syslogResponse);
-            var yumRecords = await localParseResponseAsync(yumResponse);
-            // Initial sort by timestamp
-            Records.Clear();
-            foreach(var record in 
-                syslogRecords.Concat(yumRecords)
-                .OrderBy(record => record.Timestamp))
+            var syslogTask = _clientMachine.QuerySYSLOG();
+            var yumStatusTask =  _clientMachine.QueryYumStatus();
+            await Task.WhenAll(syslogTask, yumStatusTask);
+            var syslogResponse = syslogTask.Result;
+            var yumResponse = yumStatusTask.Result;
+            if (syslogResponse != null && yumResponse != null)
             {
-                Records.Add(record);
+                var syslogRecords = await localParseResponseAsync(syslogResponse);
+                var yumRecords = await localParseResponseAsync(yumResponse);
+                // Marshal back onto the UI thread.
+                BeginInvoke(() =>
+                { 
+                    // Initial sort by timestamp
+                    Records.Clear();
+                    foreach(var record in 
+                        syslogRecords.Concat(yumRecords)
+                        .OrderBy(record => record.Timestamp))
+                    {
+                        Records.Add(record);
+                    }
+                });
             }
-        }
-        else
-        {
-            MessageBox.Show("One or both queries failed.", "Update Failed");
-        }
-        async Task<List<LogRecord>> localParseResponseAsync(HttpResponseMessage response)
-        {
-            if (response.IsSuccessStatusCode &&
-                JsonConvert
-                .DeserializeObject<List<LogRecord>>(await response.Content.ReadAsStringAsync()) is { } records)
+            else
             {
-                return records;
+                MessageBox.Show("One or both queries failed.", "Update Failed");
             }
-            else return new List<LogRecord>();
-        }
+            async Task<List<LogRecord>> localParseResponseAsync(HttpResponseMessage response)
+            {
+                if (response.IsSuccessStatusCode &&
+                    JsonConvert
+                    .DeserializeObject<List<LogRecord>>(await response.Content.ReadAsStringAsync()) is { } records)
+                {
+                    return records;
+                }
+                else return new List<LogRecord>();
+            }
+        });
     }
 }
 ~~~
 
 **Client Machine**
 
-Now all we need is a stand-in for "some client machine" that provides "two lists"
+Now all we need is a stand-in for "some client machine" that serves up "certain operations that can only be done on the client machine".
+
+~~~
+class ClientMachine
+{
+    Random _rando = new Random(1);
+    public async Task<HttpResponseMessage?> QuerySYSLOG()
+    {
+        return await Task.Run(() =>
+        {
+            var records = new[]
+            { "Server started", "Connection lost", "Recovered", "Warning issued", "All systems operational" }
+            .Select(_ => new LogRecord
+            {
+                Type = LogType.SYSLOG,
+                Description = _,
+                Timestamp = DateTime.UtcNow.AddMinutes(-_rando.Next(5, 60)),
+            });
+
+            var jsonContent = new StringContent(JsonConvert.SerializeObject(records), Encoding.UTF8, "application/json");
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = jsonContent };
+        });
+    }
+    public async Task<HttpResponseMessage?> QueryYumStatus()
+    {
+        return await Task.Run(() =>
+        {
+            var records = new[]
+            { "Version check passed", "Update required", "Critical update available", "Version up-to-date", "Unknown version error" }
+            .Select(_ => new LogRecord
+            {
+                Type = LogType.VERSION_CHECK,
+                Description = _,
+                Timestamp = DateTime.UtcNow.AddMinutes(-_rando.Next(5, 60)),
+            });
+            var jsonContent = new StringContent(JsonConvert.SerializeObject(records), Encoding.UTF8, "application/json");
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = jsonContent };
+        });
+    }
+}
+~~~
