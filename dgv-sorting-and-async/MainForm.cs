@@ -2,6 +2,8 @@ using Newtonsoft.Json;
 using System;
 using System.Collections;
 using System.ComponentModel;
+using System.Net;
+using System.Text;
 
 namespace dgv_sorting_and_async
 {
@@ -11,35 +13,9 @@ namespace dgv_sorting_and_async
         public MainForm()
         {
             InitializeComponent();
-            // Test the 
+            // Test the async method by triggering it with the Update button 
             buttonUpdate.Click += (sender, e) => 
-                _ = RetrieveLogsFromClientMachine(sender, e);
-        }
-
-        private async Task RetrieveLogsFromClientMachine(object? sender, EventArgs e)
-        {
-            var syslogTask = _clientMachine.QuerySYSLOG();
-            var yumStatusTask = _clientMachine.QueryYumStatus();
-            await Task.WhenAll(syslogTask, yumStatusTask);
-            var syslogResponse = await syslogTask;
-            var yumResponse = await yumStatusTask;
-            if (syslogResponse != null && yumResponse != null)
-            {
-                var syslogRecords = await ParseResponseAsync(syslogResponse);
-                var yumRecords = await ParseResponseAsync(yumResponse);
-                // Initial sort by timestamp
-                Records.Clear();
-                foreach(var record in 
-                    syslogRecords.Concat(yumRecords)
-                    .OrderBy(record => record.Timestamp))
-                {
-                    Records.Add(record);
-                }
-            }
-            else
-            {
-                MessageBox.Show("One or both queries failed.", "Update Failed");
-            }
+                _ = RetrieveLogsFromClientMachineAsync(sender, e);
         }
 
         protected override void OnLoad(EventArgs e)
@@ -50,15 +26,50 @@ namespace dgv_sorting_and_async
             dataGridView.Columns[nameof(LogRecord.Description)].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
         }
         IList Records { get; } = new SortableBindingList<LogRecord>();
-        private async Task<List<LogRecord>> ParseResponseAsync(HttpResponseMessage response)
+        
+        private async Task RetrieveLogsFromClientMachineAsync(object? sender, EventArgs e)
         {
-            if( response.IsSuccessStatusCode && 
-                JsonConvert
-                .DeserializeObject<List<LogRecord>>(await response.Content.ReadAsStringAsync()) is { } records)
+            // "The [...] method that is fired [...] conjoins two
+            // lists into one on a separate thread via Task.Run()"
+            await Task.Run(async() =>
             {
-                return records;
-            }
-            else return  new List<LogRecord>();
+                var syslogTask = _clientMachine.QuerySYSLOG();
+                var yumStatusTask =  _clientMachine.QueryYumStatus();
+                await Task.WhenAll(syslogTask, yumStatusTask);
+                var syslogResponse = syslogTask.Result;
+                var yumResponse = yumStatusTask.Result;
+                if (syslogResponse != null && yumResponse != null)
+                {
+                    var syslogRecords = await localParseResponseAsync(syslogResponse);
+                    var yumRecords = await localParseResponseAsync(yumResponse);
+                    // Marshal back onto the UI thread.
+                    BeginInvoke(() =>
+                    { 
+                        // Initial sort by timestamp
+                        Records.Clear();
+                        foreach(var record in 
+                            syslogRecords.Concat(yumRecords)
+                            .OrderBy(record => record.Timestamp))
+                        {
+                            Records.Add(record);
+                        }
+                    });
+                }
+                else
+                {
+                    MessageBox.Show("One or both queries failed.", "Update Failed");
+                }
+                async Task<List<LogRecord>> localParseResponseAsync(HttpResponseMessage response)
+                {
+                    if (response.IsSuccessStatusCode &&
+                        JsonConvert
+                        .DeserializeObject<List<LogRecord>>(await response.Content.ReadAsStringAsync()) is { } records)
+                    {
+                        return records;
+                    }
+                    else return new List<LogRecord>();
+                }
+            });
         }
     }
     public enum LogType{ SYSLOG, VERSION_CHECK }
@@ -91,10 +102,7 @@ namespace dgv_sorting_and_async
                     _isSorted = true;
                 }
             }
-            else
-            {
-                _isSorted = false;
-            }
+            else _isSorted = false;
             ResetBindings();
         }
         private bool _isSorted;
@@ -111,35 +119,36 @@ namespace dgv_sorting_and_async
         Random _rando = new Random(1);
         public async Task<HttpResponseMessage?> QuerySYSLOG()
         {
-            await Task.Delay(TimeSpan.FromSeconds(_rando.NextDouble()));    // Simulated query time
-            var records = new[]
-            { "Server started", "Connection lost", "Recovered", "Warning issued", "All systems operational" }
-            .Select(_ => new LogRecord
+            return await Task.Run(() =>
             {
-                Type = LogType.SYSLOG,
-                Description = _,
-                Timestamp = DateTime.UtcNow.AddMinutes(-_rando.Next(5, 60)),
+                var records = new[]
+                { "Server started", "Connection lost", "Recovered", "Warning issued", "All systems operational" }
+                .Select(_ => new LogRecord
+                {
+                    Type = LogType.SYSLOG,
+                    Description = _,
+                    Timestamp = DateTime.UtcNow.AddMinutes(-_rando.Next(5, 60)),
+                });
+
+                var jsonContent = new StringContent(JsonConvert.SerializeObject(records), Encoding.UTF8, "application/json");
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = jsonContent };
             });
-
-            var jsonContent = new StringContent(Newtonsoft.Json.JsonConvert.SerializeObject(records), System.Text.Encoding.UTF8, "application/json");
-            return new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = jsonContent };
-
         }
         public async Task<HttpResponseMessage?> QueryYumStatus()
         {
-            await Task.Delay(TimeSpan.FromSeconds(_rando.NextDouble()));
-            var records = new[]
-            { "Version check passed", "Update required", "Critical update available", "Version up-to-date", "Unknown version error" }
-            .Select(_ => new LogRecord
+            return await Task.Run(() =>
             {
-                Type = LogType.VERSION_CHECK,
-                Description = _,
-                Timestamp = DateTime.UtcNow.AddMinutes(-_rando.Next(5, 60)),
+                var records = new[]
+                { "Version check passed", "Update required", "Critical update available", "Version up-to-date", "Unknown version error" }
+                .Select(_ => new LogRecord
+                {
+                    Type = LogType.VERSION_CHECK,
+                    Description = _,
+                    Timestamp = DateTime.UtcNow.AddMinutes(-_rando.Next(5, 60)),
+                });
+                var jsonContent = new StringContent(JsonConvert.SerializeObject(records), Encoding.UTF8, "application/json");
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = jsonContent };
             });
-
-            var jsonContent = new StringContent(Newtonsoft.Json.JsonConvert.SerializeObject(records), System.Text.Encoding.UTF8, "application/json");
-            return new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = jsonContent };
-
         }
     }
 }
