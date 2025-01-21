@@ -139,7 +139,7 @@ namespace dgv_sorting_and_async
                 {
                     Type = logType,
                     Description = _,
-                    Timestamp = DateTime.UtcNow.AddSeconds(-_rando.NextDouble() * 3600)
+                    Timestamp = DateTime.Now.AddSeconds(-_rando.NextDouble() * 3600)
                 });
 
                 var jsonContent = new StringContent(JsonConvert.SerializeObject(records), Encoding.UTF8, "application/json");
